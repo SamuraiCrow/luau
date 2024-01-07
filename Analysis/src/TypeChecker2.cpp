@@ -3,9 +3,9 @@
 
 #include "Luau/Ast.h"
 #include "Luau/AstQuery.h"
-#include "Luau/Clone.h"
 #include "Luau/Common.h"
 #include "Luau/DcrLogger.h"
+#include "Luau/DenseHash.h"
 #include "Luau/Error.h"
 #include "Luau/InsertionOrderedMap.h"
 #include "Luau/Instantiation.h"
@@ -15,15 +15,17 @@
 #include "Luau/ToString.h"
 #include "Luau/TxnLog.h"
 #include "Luau/Type.h"
-#include "Luau/TypePack.h"
-#include "Luau/TypeUtils.h"
 #include "Luau/TypeFamily.h"
+#include "Luau/TypeFwd.h"
+#include "Luau/TypePack.h"
+#include "Luau/TypePath.h"
+#include "Luau/TypeUtils.h"
+#include "Luau/TypeOrPack.h"
 #include "Luau/VisitType.h"
 
 #include <algorithm>
 
 LUAU_FASTFLAG(DebugLuauMagicTypes)
-LUAU_FASTFLAG(LuauFloorDivision);
 
 namespace Luau
 {
@@ -866,6 +868,22 @@ struct TypeChecker2
         }
     }
 
+    std::optional<TypeId> getBindingType(AstExpr* expr)
+    {
+        if (auto localExpr = expr->as<AstExprLocal>())
+        {
+            Scope* s = stack.back();
+            return s->lookup(localExpr->local);
+        }
+        else if (auto globalExpr = expr->as<AstExprGlobal>())
+        {
+            Scope* s = stack.back();
+            return s->lookup(globalExpr->name);
+        }
+        else
+            return std::nullopt;
+    }
+
     void visit(AstStatAssign* assign)
     {
         size_t count = std::min(assign->vars.size, assign->values.size);
@@ -883,7 +901,15 @@ struct TypeChecker2
             if (get<NeverType>(lhsType))
                 continue;
 
-            testIsSubtype(rhsType, lhsType, rhs->location);
+            bool ok = testIsSubtype(rhsType, lhsType, rhs->location);
+
+            // If rhsType </: lhsType, then it's not useful to also report that rhsType </: bindingType
+            if (ok)
+            {
+                std::optional<TypeId> bindingType = getBindingType(lhs);
+                if (bindingType)
+                    testIsSubtype(rhsType, *bindingType, rhs->location);
+            }
         }
     }
 
@@ -1577,8 +1603,8 @@ struct TypeChecker2
         visit(indexExpr->expr, ValueContext::RValue);
         visit(indexExpr->index, ValueContext::RValue);
 
-        TypeId exprType = lookupType(indexExpr->expr);
-        TypeId indexType = lookupType(indexExpr->index);
+        TypeId exprType = follow(lookupType(indexExpr->expr));
+        TypeId indexType = follow(lookupType(indexExpr->index));
 
         if (auto tt = get<TableType>(exprType))
         {
@@ -1634,12 +1660,46 @@ struct TypeChecker2
                 if (argIt == end(inferredFtv->argTypes))
                     break;
 
+                TypeId inferredArgTy = *argIt;
+
                 if (arg->annotation)
                 {
-                    TypeId inferredArgTy = *argIt;
                     TypeId annotatedArgTy = lookupAnnotation(arg->annotation);
 
                     testIsSubtype(inferredArgTy, annotatedArgTy, arg->location);
+                }
+
+                // Some Luau constructs can result in an argument type being
+                // reduced to never by inference. In this case, we want to
+                // report an error at the function, instead of reporting an
+                // error at every callsite.
+                if (is<NeverType>(follow(inferredArgTy)))
+                {
+                    // If the annotation simplified to never, we don't want to
+                    // even look at contributors.
+                    bool explicitlyNever = false;
+                    if (arg->annotation)
+                    {
+                        TypeId annotatedArgTy = lookupAnnotation(arg->annotation);
+                        explicitlyNever = is<NeverType>(annotatedArgTy);
+                    }
+
+                    // Not following here is deliberate: the contribution map is
+                    // keyed by type pointer, but that type pointer has, at some
+                    // point, been transmuted to a bound type pointing to never.
+                    if (const auto contributors = module->upperBoundContributors.find(inferredArgTy); contributors && !explicitlyNever)
+                    {
+                        // It's unfortunate that we can't link error messages
+                        // together. For now, this will work.
+                        reportError(
+                            GenericError{format(
+                                "Parameter '%s' has been reduced to never. This function is not callable with any possible value.", arg->name.value)},
+                            arg->location);
+                        for (const auto& [site, component] : *contributors)
+                            reportError(ExtraInformation{format("Parameter '%s' is required to be a subtype of '%s' here.", arg->name.value,
+                                            toString(component).c_str())},
+                                site);
+                    }
                 }
 
                 ++argIt;
@@ -1793,8 +1853,6 @@ struct TypeChecker2
         bool typesHaveIntersection = normalizer.isIntersectionInhabited(leftType, rightType);
         if (auto it = kBinaryOpMetamethods.find(expr->op); it != kBinaryOpMetamethods.end())
         {
-            LUAU_ASSERT(FFlag::LuauFloorDivision || expr->op != AstExprBinary::Op::FloorDiv);
-
             std::optional<TypeId> leftMt = getMetatable(leftType, builtinTypes);
             std::optional<TypeId> rightMt = getMetatable(rightType, builtinTypes);
             bool matches = leftMt == rightMt;
@@ -1983,8 +2041,6 @@ struct TypeChecker2
         case AstExprBinary::Op::FloorDiv:
         case AstExprBinary::Op::Pow:
         case AstExprBinary::Op::Mod:
-            LUAU_ASSERT(FFlag::LuauFloorDivision || expr->op != AstExprBinary::Op::FloorDiv);
-
             testIsSubtype(leftType, builtinTypes->numberType, expr->left->location);
             testIsSubtype(rightType, builtinTypes->numberType, expr->right->location);
 
@@ -2387,6 +2443,72 @@ struct TypeChecker2
         }
     }
 
+    template<typename TID>
+    std::optional<std::string> explainReasonings(TID subTy, TID superTy, Location location, const SubtypingResult& r)
+    {
+        if (r.reasoning.empty())
+            return std::nullopt;
+
+        std::vector<std::string> reasons;
+        for (const SubtypingReasoning& reasoning : r.reasoning)
+        {
+            if (reasoning.subPath.empty() && reasoning.superPath.empty())
+                continue;
+
+            std::optional<TypeOrPack> subLeaf = traverse(subTy, reasoning.subPath, builtinTypes);
+            std::optional<TypeOrPack> superLeaf = traverse(superTy, reasoning.superPath, builtinTypes);
+
+            if (!subLeaf || !superLeaf)
+                ice->ice("Subtyping test returned a reasoning with an invalid path", location);
+
+            if (!get2<TypeId, TypeId>(*subLeaf, *superLeaf) && !get2<TypePackId, TypePackId>(*subLeaf, *superLeaf))
+                ice->ice("Subtyping test returned a reasoning where one path ends at a type and the other ends at a pack.", location);
+
+            std::string relation = "a subtype of";
+            if (reasoning.variance == SubtypingVariance::Invariant)
+                relation = "exactly";
+            else if (reasoning.variance == SubtypingVariance::Contravariant)
+                relation = "a supertype of";
+
+            std::string reason;
+            if (reasoning.subPath == reasoning.superPath)
+                reason = "at " + toString(reasoning.subPath) + ", " + toString(*subLeaf) + " is not " + relation + " " + toString(*superLeaf);
+            else
+                reason = "type " + toString(subTy) + toString(reasoning.subPath, /* prefixDot */ true) + " (" + toString(*subLeaf) + ") is not " +
+                         relation + " " + toString(superTy) + toString(reasoning.superPath, /* prefixDot */ true) + " (" + toString(*superLeaf) + ")";
+
+            reasons.push_back(reason);
+        }
+
+        // DenseHashSet ordering is entirely undefined, so we want to
+        // sort the reasons here to achieve a stable error
+        // stringification.
+        std::sort(reasons.begin(), reasons.end());
+        std::string allReasons;
+        bool first = true;
+        for (const std::string& reason : reasons)
+        {
+            if (first)
+                first = false;
+            else
+                allReasons += "\n\t";
+
+            allReasons += reason;
+        }
+
+        return allReasons;
+    }
+
+    void explainError(TypeId subTy, TypeId superTy, Location location, const SubtypingResult& result)
+    {
+        reportError(TypeMismatch{superTy, subTy, explainReasonings(subTy, superTy, location, result).value_or("")}, location);
+    }
+
+    void explainError(TypePackId subTy, TypePackId superTy, Location location, const SubtypingResult& result)
+    {
+        reportError(TypePackMismatch{superTy, subTy, explainReasonings(subTy, superTy, location, result).value_or("")}, location);
+    }
+
     bool testIsSubtype(TypeId subTy, TypeId superTy, Location location)
     {
         SubtypingResult r = subtyping->isSubtype(subTy, superTy);
@@ -2395,7 +2517,7 @@ struct TypeChecker2
             reportError(NormalizationTooComplex{}, location);
 
         if (!r.isSubtype && !r.isErrorSuppressing)
-            reportError(TypeMismatch{superTy, subTy}, location);
+            explainError(subTy, superTy, location, r);
 
         return r.isSubtype;
     }
@@ -2408,7 +2530,7 @@ struct TypeChecker2
             reportError(NormalizationTooComplex{}, location);
 
         if (!r.isSubtype && !r.isErrorSuppressing)
-            reportError(TypePackMismatch{superTy, subTy}, location);
+            explainError(subTy, superTy, location, r);
 
         return r.isSubtype;
     }
@@ -2456,7 +2578,7 @@ struct TypeChecker2
             if (!normalizer.isInhabited(ty))
                 return;
 
-            std::unordered_set<TypeId> seen;
+            DenseHashSet<TypeId> seen{nullptr};
             bool found = hasIndexTypeFromType(ty, prop, location, seen, astIndexExprType);
             foundOneProp |= found;
             if (!found)
@@ -2517,14 +2639,14 @@ struct TypeChecker2
         }
     }
 
-    bool hasIndexTypeFromType(TypeId ty, const std::string& prop, const Location& location, std::unordered_set<TypeId>& seen, TypeId astIndexExprType)
+    bool hasIndexTypeFromType(TypeId ty, const std::string& prop, const Location& location, DenseHashSet<TypeId>& seen, TypeId astIndexExprType)
     {
         // If we have already encountered this type, we must assume that some
         // other codepath will do the right thing and signal false if the
         // property is not present.
-        const bool isUnseen = seen.insert(ty).second;
-        if (!isUnseen)
+        if (seen.contains(ty))
             return true;
+        seen.insert(ty);
 
         if (get<ErrorType>(ty) || get<AnyType>(ty) || get<NeverType>(ty))
             return true;

@@ -1,13 +1,12 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "ConstraintSolver.h"
-#include "Error.h"
+#include "Luau/ConstraintSolver.h"
 #include "Luau/Error.h"
 #include "Luau/NotNull.h"
+#include "Luau/TypeCheckLimits.h"
+#include "Luau/TypeFwd.h"
 #include "Luau/Variant.h"
-#include "NotNull.h"
-#include "TypeCheckLimits.h"
 
 #include <functional>
 #include <string>
@@ -16,14 +15,7 @@
 namespace Luau
 {
 
-struct Type;
-using TypeId = const Type*;
-
-struct TypePackVar;
-using TypePackId = const TypePackVar*;
-
 struct TypeArena;
-struct BuiltinTypes;
 struct TxnLog;
 class Normalizer;
 
@@ -93,7 +85,7 @@ struct TypeFamily
     std::string name;
 
     /// The reducer function for the type family.
-    std::function<TypeFamilyReductionResult<TypeId>(std::vector<TypeId>, std::vector<TypePackId>, NotNull<TypeFamilyContext>)> reducer;
+    std::function<TypeFamilyReductionResult<TypeId>(const std::vector<TypeId>&, const std::vector<TypePackId>&, NotNull<TypeFamilyContext>)> reducer;
 };
 
 /// Represents a type function that may be applied to map a series of types and
@@ -105,7 +97,7 @@ struct TypePackFamily
     std::string name;
 
     /// The reducer function for the type pack family.
-    std::function<TypeFamilyReductionResult<TypePackId>(std::vector<TypeId>, std::vector<TypePackId>, NotNull<TypeFamilyContext>)> reducer;
+    std::function<TypeFamilyReductionResult<TypePackId>(const std::vector<TypeId>&, const std::vector<TypePackId>&, NotNull<TypeFamilyContext>)> reducer;
 };
 
 struct FamilyGraphReductionResult
@@ -149,6 +141,10 @@ struct BuiltinTypeFamilies
 {
     BuiltinTypeFamilies();
 
+    TypeFamily notFamily;
+    TypeFamily lenFamily;
+    TypeFamily unmFamily;
+
     TypeFamily addFamily;
     TypeFamily subFamily;
     TypeFamily mulFamily;
@@ -157,8 +153,16 @@ struct BuiltinTypeFamilies
     TypeFamily powFamily;
     TypeFamily modFamily;
 
+    TypeFamily concatFamily;
+
     TypeFamily andFamily;
     TypeFamily orFamily;
+
+    TypeFamily ltFamily;
+    TypeFamily leFamily;
+    TypeFamily eqFamily;
+
+    TypeFamily refineFamily;
 
     void addToScope(NotNull<TypeArena> arena, NotNull<Scope> scope) const;
 };

@@ -1,15 +1,60 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 
-#include "doctest.h"
-#include "Fixture.h"
-#include "RegisterCallbacks.h"
+#include "Luau/TypePath.h"
 
 #include "Luau/Normalize.h"
 #include "Luau/Subtyping.h"
 #include "Luau/Type.h"
 #include "Luau/TypePack.h"
 
+#include "doctest.h"
+#include "Fixture.h"
+#include "RegisterCallbacks.h"
+
+#include <initializer_list>
+
 using namespace Luau;
+
+namespace Luau
+{
+
+std::ostream& operator<<(std::ostream& lhs, const SubtypingVariance& variance)
+{
+    switch (variance)
+    {
+    case SubtypingVariance::Covariant:
+        return lhs << "covariant";
+    case SubtypingVariance::Contravariant:
+        return lhs << "contravariant";
+    case SubtypingVariance::Invariant:
+        return lhs << "invariant";
+    case SubtypingVariance::Invalid:
+        return lhs << "*invalid*";
+    }
+
+    return lhs;
+}
+
+std::ostream& operator<<(std::ostream& lhs, const SubtypingReasoning& reasoning)
+{
+    return lhs << toString(reasoning.subPath) << " </: " << toString(reasoning.superPath) << " (" << reasoning.variance << ")";
+}
+
+bool operator==(const DenseHashSet<SubtypingReasoning, SubtypingReasoningHash>& set, const std::vector<SubtypingReasoning>& items)
+{
+    if (items.size() != set.size())
+        return false;
+
+    for (const SubtypingReasoning& r : items)
+    {
+        if (!set.contains(r))
+            return false;
+    }
+
+    return true;
+}
+
+}; // namespace Luau
 
 struct SubtypeFixture : Fixture
 {
@@ -600,12 +645,7 @@ TEST_CASE_FIXTURE(SubtypeFixture, "(number) -> () <!: <T>(T) -> ()")
 
 TEST_CASE_FIXTURE(SubtypeFixture, "<T>() -> (T, T) <!: () -> (string, number)")
 {
-    TypeId nothingToTwoTs = arena.addType(FunctionType{
-        {genericT},
-        {},
-        builtinTypes->emptyTypePack,
-        arena.addTypePack({genericT, genericT})
-    });
+    TypeId nothingToTwoTs = arena.addType(FunctionType{{genericT}, {}, builtinTypes->emptyTypePack, arena.addTypePack({genericT, genericT})});
 
     TypeId nothingToStringAndNumber = fn({}, {builtinTypes->stringType, builtinTypes->numberType});
 
@@ -747,7 +787,7 @@ TEST_IS_NOT_SUBTYPE(negate(builtinTypes->neverType), builtinTypes->stringType);
 TEST_IS_SUBTYPE(negate(builtinTypes->unknownType), builtinTypes->stringType);
 TEST_IS_NOT_SUBTYPE(negate(builtinTypes->anyType), builtinTypes->stringType);
 TEST_IS_SUBTYPE(negate(meet(builtinTypes->neverType, builtinTypes->unknownType)), builtinTypes->stringType);
-TEST_IS_NOT_SUBTYPE(negate(join(builtinTypes->neverType, builtinTypes->unknownType)), builtinTypes->stringType);
+TEST_IS_SUBTYPE(negate(join(builtinTypes->neverType, builtinTypes->unknownType)), builtinTypes->stringType);
 
 // Negated supertypes: never/unknown/any/error
 TEST_IS_SUBTYPE(builtinTypes->stringType, negate(builtinTypes->neverType));
@@ -769,7 +809,7 @@ TEST_IS_SUBTYPE(builtinTypes->booleanType, negate(meet(builtinTypes->stringType,
 TEST_IS_SUBTYPE(builtinTypes->trueType, negate(meet(builtinTypes->booleanType, builtinTypes->numberType)));
 TEST_IS_SUBTYPE(rootClass, negate(meet(builtinTypes->classType, childClass)));
 TEST_IS_SUBTYPE(childClass, negate(meet(builtinTypes->classType, builtinTypes->numberType)));
-TEST_IS_NOT_SUBTYPE(builtinTypes->unknownType, negate(meet(builtinTypes->classType, builtinTypes->numberType)));
+TEST_IS_SUBTYPE(builtinTypes->unknownType, negate(meet(builtinTypes->classType, builtinTypes->numberType)));
 TEST_IS_NOT_SUBTYPE(str("foo"), negate(meet(builtinTypes->stringType, negate(str("bar")))));
 
 // Negated supertypes: tables and metatables
@@ -845,6 +885,15 @@ TEST_CASE_FIXTURE(SubtypeFixture, "Child & ~GrandchildOne <!: number")
 {
     CHECK_IS_NOT_SUBTYPE(meet(childClass, negate(grandchildOneClass)), builtinTypes->numberType);
 }
+
+TEST_CASE_FIXTURE(SubtypeFixture, "semantic_subtyping_disj")
+{
+    TypeId subTy = builtinTypes->unknownType;
+    TypeId superTy = join(negate(builtinTypes->numberType), negate(builtinTypes->stringType));
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(result.isSubtype);
+}
+
 
 TEST_CASE_FIXTURE(SubtypeFixture, "t1 where t1 = {trim: (t1) -> string} <: t2 where t2 = {trim: (t2) -> string}")
 {
@@ -989,6 +1038,16 @@ TEST_CASE_FIXTURE(SubtypeFixture, "(string | number) & (\"a\" | true) <: { lower
     CHECK_IS_SUBTYPE(base, tableWithLower);
 }
 
+TEST_CASE_FIXTURE(SubtypeFixture, "number <: ~~number")
+{
+    CHECK_IS_SUBTYPE(builtinTypes->numberType, negate(negate(builtinTypes->numberType)));
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "~~number <: number")
+{
+    CHECK_IS_SUBTYPE(negate(negate(builtinTypes->numberType)), builtinTypes->numberType);
+}
+
 /*
  * Within the scope to which a generic belongs, that generic ought to be treated
  * as its bounds.
@@ -1023,11 +1082,15 @@ TEST_IS_NOT_SUBTYPE(tbl({}), idx(builtinTypes->numberType, builtinTypes->numberT
 TEST_IS_NOT_SUBTYPE(tbl({{"X", builtinTypes->numberType}}), idx(builtinTypes->numberType, builtinTypes->numberType));
 TEST_IS_NOT_SUBTYPE(idx(builtinTypes->numberType, builtinTypes->numberType), tbl({{"X", builtinTypes->numberType}}));
 
-TEST_IS_NOT_SUBTYPE(idx(join(builtinTypes->numberType, builtinTypes->stringType), builtinTypes->numberType), idx(builtinTypes->numberType, builtinTypes->numberType));
-TEST_IS_NOT_SUBTYPE(idx(builtinTypes->numberType, builtinTypes->numberType), idx(join(builtinTypes->numberType, builtinTypes->stringType), builtinTypes->numberType));
+TEST_IS_NOT_SUBTYPE(
+    idx(join(builtinTypes->numberType, builtinTypes->stringType), builtinTypes->numberType), idx(builtinTypes->numberType, builtinTypes->numberType));
+TEST_IS_NOT_SUBTYPE(
+    idx(builtinTypes->numberType, builtinTypes->numberType), idx(join(builtinTypes->numberType, builtinTypes->stringType), builtinTypes->numberType));
 
-TEST_IS_NOT_SUBTYPE(idx(builtinTypes->numberType, join(builtinTypes->stringType, builtinTypes->numberType)), idx(builtinTypes->numberType, builtinTypes->numberType));
-TEST_IS_NOT_SUBTYPE(idx(builtinTypes->numberType, builtinTypes->numberType), idx(builtinTypes->numberType, join(builtinTypes->stringType, builtinTypes->numberType)));
+TEST_IS_NOT_SUBTYPE(
+    idx(builtinTypes->numberType, join(builtinTypes->stringType, builtinTypes->numberType)), idx(builtinTypes->numberType, builtinTypes->numberType));
+TEST_IS_NOT_SUBTYPE(
+    idx(builtinTypes->numberType, builtinTypes->numberType), idx(builtinTypes->numberType, join(builtinTypes->stringType, builtinTypes->numberType)));
 
 TEST_IS_NOT_SUBTYPE(tbl({{"X", builtinTypes->numberType}}), idx(builtinTypes->stringType, builtinTypes->numberType));
 TEST_IS_SUBTYPE(idx(builtinTypes->stringType, builtinTypes->numberType), tbl({{"X", builtinTypes->numberType}}));
@@ -1037,5 +1100,194 @@ TEST_IS_NOT_SUBTYPE(idx(builtinTypes->stringType, builtinTypes->numberType), tbl
 
 TEST_IS_SUBTYPE(tbl({{"X", builtinTypes->numberType}, {"Y", builtinTypes->numberType}}), tbl({{"X", builtinTypes->numberType}}));
 TEST_IS_NOT_SUBTYPE(tbl({{"X", builtinTypes->numberType}}), tbl({{"X", builtinTypes->numberType}, {"Y", builtinTypes->numberType}}));
+
+TEST_CASE_FIXTURE(SubtypeFixture, "interior_tests_are_cached")
+{
+    TypeId tableA = tbl({{"X", builtinTypes->numberType}, {"Y", builtinTypes->numberType}});
+    TypeId tableB = tbl({{"X", builtinTypes->optionalNumberType}, {"Y", builtinTypes->optionalNumberType}});
+
+    CHECK_IS_NOT_SUBTYPE(tableA, tableB);
+
+    const SubtypingResult* cachedResult = subtyping.peekCache().find({builtinTypes->numberType, builtinTypes->optionalNumberType});
+    REQUIRE(cachedResult);
+
+    CHECK(cachedResult->isSubtype);
+
+    cachedResult = subtyping.peekCache().find({tableA, tableB});
+    REQUIRE(cachedResult);
+
+    CHECK(!cachedResult->isSubtype);
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "results_that_are_contingent_on_generics_are_not_cached")
+{
+    // <T>(T) -> T <: (number) -> number
+    CHECK_IS_SUBTYPE(genericTToTType, numberToNumberType);
+
+    CHECK(subtyping.peekCache().empty());
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "dont_cache_tests_involving_cycles")
+{
+    TypeId tableA = arena.addType(BlockedType{});
+    TypeId tableA2 = tbl({{"self", tableA}});
+    asMutable(tableA)->ty.emplace<BoundType>(tableA2);
+
+    TypeId tableB = arena.addType(BlockedType{});
+    TypeId tableB2 = tbl({{"self", tableB}});
+    asMutable(tableB)->ty.emplace<BoundType>(tableB2);
+
+    CHECK_IS_SUBTYPE(tableA, tableB);
+
+    CHECK(!subtyping.peekCache().find({tableA, tableB}));
+}
+
+TEST_SUITE_END();
+
+TEST_SUITE_BEGIN("Subtyping.Subpaths");
+
+TEST_CASE_FIXTURE(SubtypeFixture, "table_property")
+{
+    TypeId subTy = tbl({{"X", builtinTypes->numberType}});
+    TypeId superTy = tbl({{"X", builtinTypes->booleanType}});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{/* subPath */ Path(TypePath::Property("X")),
+                                  /* superPath */ Path(TypePath::Property("X")),
+                                  /* variance */ SubtypingVariance::Invariant}});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "table_indexers")
+{
+    TypeId subTy = idx(builtinTypes->numberType, builtinTypes->stringType);
+    TypeId superTy = idx(builtinTypes->stringType, builtinTypes->numberType);
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                              /* subPath */ Path(TypePath::TypeField::IndexLookup),
+                                              /* superPath */ Path(TypePath::TypeField::IndexLookup),
+                                              /* variance */ SubtypingVariance::Invariant,
+                                          },
+                                  SubtypingReasoning{
+                                      /* subPath */ Path(TypePath::TypeField::IndexResult),
+                                      /* superPath */ Path(TypePath::TypeField::IndexResult),
+                                      /* variance */ SubtypingVariance::Invariant,
+                                  }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "fn_arguments")
+{
+    TypeId subTy = fn({builtinTypes->numberType}, {});
+    TypeId superTy = fn({builtinTypes->stringType}, {});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().args().index(0).build(),
+                                  /* superPath */ TypePath::PathBuilder().args().index(0).build(),
+                                  /* variance */ SubtypingVariance::Contravariant,
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "fn_arguments_tail")
+{
+    TypeId subTy = fn({}, VariadicTypePack{builtinTypes->numberType}, {});
+    TypeId superTy = fn({}, VariadicTypePack{builtinTypes->stringType}, {});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().args().tail().variadic().build(),
+                                  /* superPath */ TypePath::PathBuilder().args().tail().variadic().build(),
+                                  /* variance */ SubtypingVariance::Contravariant,
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "fn_rets")
+{
+    TypeId subTy = fn({}, {builtinTypes->numberType});
+    TypeId superTy = fn({}, {builtinTypes->stringType});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().rets().index(0).build(),
+                                  /* superPath */ TypePath::PathBuilder().rets().index(0).build(),
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "fn_rets_tail")
+{
+    TypeId subTy = fn({}, {}, VariadicTypePack{builtinTypes->numberType});
+    TypeId superTy = fn({}, {}, VariadicTypePack{builtinTypes->stringType});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().rets().tail().variadic().build(),
+                                  /* superPath */ TypePath::PathBuilder().rets().tail().variadic().build(),
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "nested_table_properties")
+{
+    TypeId subTy = tbl({{"X", tbl({{"Y", tbl({{"Z", builtinTypes->numberType}})}})}});
+    TypeId superTy = tbl({{"X", tbl({{"Y", tbl({{"Z", builtinTypes->stringType}})}})}});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().prop("X").prop("Y").prop("Z").build(),
+                                  /* superPath */ TypePath::PathBuilder().prop("X").prop("Y").prop("Z").build(),
+                                  /* variance */ SubtypingVariance::Invariant,
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "string_table_mt")
+{
+    TypeId subTy = builtinTypes->stringType;
+    TypeId superTy = tbl({{"X", builtinTypes->numberType}});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    // This check is weird. Because we don't have built-in types, we don't have
+    // the string metatable. That means subtyping will see that the entire
+    // metatable is empty, and abort there, without looking at the metatable
+    // properties (because there aren't any).
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::PathBuilder().mt().prop("__index").build(),
+                                  /* superPath */ TypePath::kEmpty,
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "negation")
+{
+    TypeId subTy = builtinTypes->numberType;
+    TypeId superTy = negate(builtinTypes->numberType);
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{SubtypingReasoning{
+                                  /* subPath */ TypePath::kEmpty,
+                                  /* superPath */ Path(TypePath::TypeField::Negated),
+                              }});
+}
+
+TEST_CASE_FIXTURE(SubtypeFixture, "multiple_reasonings")
+{
+    TypeId subTy = tbl({{"X", builtinTypes->stringType}, {"Y", builtinTypes->numberType}});
+    TypeId superTy = tbl({{"X", builtinTypes->numberType}, {"Y", builtinTypes->stringType}});
+
+    SubtypingResult result = isSubtype(subTy, superTy);
+    CHECK(!result.isSubtype);
+    CHECK(result.reasoning == std::vector{
+                                  SubtypingReasoning{/* subPath */ Path(TypePath::Property("X")), /* superPath */ Path(TypePath::Property("X")),
+                                      /* variance */ SubtypingVariance::Invariant},
+                                  SubtypingReasoning{/* subPath */ Path(TypePath::Property("Y")), /* superPath */ Path(TypePath::Property("Y")),
+                                      /* variance */ SubtypingVariance::Invariant},
+                              });
+}
 
 TEST_SUITE_END();

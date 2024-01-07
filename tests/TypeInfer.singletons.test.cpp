@@ -3,7 +3,6 @@
 #include "Fixture.h"
 
 #include "doctest.h"
-#include "Luau/BuiltinDefinitions.h"
 
 using namespace Luau;
 
@@ -141,9 +140,9 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_function_call_with_singletons")
 TEST_CASE_FIXTURE(Fixture, "overloaded_function_call_with_singletons_mismatch")
 {
     CheckResult result = check(R"(
-        function f(a, b) end
-        local g : ((true, string) -> ()) & ((false, number) -> ()) = (f::any)
-        g(true, 37)
+        function f(g: ((true, string) -> ()) & ((false, number) -> ()))
+            g(true, 37)
+        end
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
@@ -327,7 +326,7 @@ local a: Animal = { tag = 'cat', cafood = 'something' }
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     const std::string expected = R"(Type 'a' could not be converted into 'Cat | Dog'
 caused by:
-  None of the union options are compatible. For example: 
+  None of the union options are compatible. For example:
 Table type 'a' not compatible with type 'Cat' because the former is missing field 'catfood')";
     CHECK_EQ(expected, toString(result.errors[0]));
 }
@@ -345,7 +344,7 @@ local a: Result = { success = false, result = 'something' }
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     const std::string expected = R"(Type 'a' could not be converted into 'Bad | Good'
 caused by:
-  None of the union options are compatible. For example: 
+  None of the union options are compatible. For example:
 Table type 'a' not compatible with type 'Bad' because the former is missing field 'error')";
     CHECK_EQ(expected, toString(result.errors[0]));
 }
@@ -353,7 +352,7 @@ Table type 'a' not compatible with type 'Bad' because the former is missing fiel
 TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
 {
     ScopedFastFlag sff[] = {
-        {"DebugLuauDeferredConstraintResolution", true},
+        {FFlag::DebugLuauDeferredConstraintResolution, true},
     };
     CheckResult result = check(R"(
         type Ok<T> = {success: true, result: T}
@@ -366,7 +365,9 @@ TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    const std::string expectedError = "Type 'a' could not be converted into 'Err<number> | Ok<string>'";
+    const std::string expectedError =
+        "Type 'a' could not be converted into 'Err<number> | Ok<string>'; type a (a) is not a subtype of Err<number> | Ok<string>[1] (Err<number>)\n"
+        "\ttype a[\"success\"] (false) is not exactly Err<number> | Ok<string>[0][\"success\"] (true)";
 
     CHECK(toString(result.errors[0]) == expectedError);
 }
@@ -427,7 +428,11 @@ TEST_CASE_FIXTURE(Fixture, "widening_happens_almost_everywhere")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ("string", toString(requireType("copy")));
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ(R"("foo")", toString(requireType("copy")));
+    else
+        CHECK_EQ("string", toString(requireType("copy")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "widening_happens_almost_everywhere_except_for_tables")

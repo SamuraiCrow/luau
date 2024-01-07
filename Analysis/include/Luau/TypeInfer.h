@@ -9,9 +9,8 @@
 #include "Luau/Substitution.h"
 #include "Luau/Symbol.h"
 #include "Luau/TxnLog.h"
-#include "Luau/Type.h"
+#include "Luau/TypeFwd.h"
 #include "Luau/TypeCheckLimits.h"
-#include "Luau/TypePack.h"
 #include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
 #include "Luau/UnifierSharedState.h"
@@ -378,6 +377,7 @@ public:
     const TypeId stringType;
     const TypeId booleanType;
     const TypeId threadType;
+    const TypeId bufferType;
     const TypeId anyType;
     const TypeId unknownType;
     const TypeId neverType;

@@ -97,6 +97,7 @@ inline bool isBlockTerminator(IrCmd cmd)
     case IrCmd::JUMP_CMP_INT:
     case IrCmd::JUMP_EQ_POINTER:
     case IrCmd::JUMP_CMP_NUM:
+    case IrCmd::JUMP_FORN_LOOP_COND:
     case IrCmd::JUMP_SLOT_MATCH:
     case IrCmd::RETURN:
     case IrCmd::FORGLOOP:
@@ -127,6 +128,7 @@ inline bool isNonTerminatingJump(IrCmd cmd)
     case IrCmd::CHECK_SLOT_MATCH:
     case IrCmd::CHECK_NODE_NO_NEXT:
     case IrCmd::CHECK_NODE_VALUE:
+    case IrCmd::CHECK_BUFFER_LEN:
         return true;
     default:
         break;
@@ -196,6 +198,13 @@ inline bool hasResult(IrCmd cmd)
     case IrCmd::GET_TYPEOF:
     case IrCmd::NEWCLOSURE:
     case IrCmd::FINDUPVAL:
+    case IrCmd::BUFFER_READI8:
+    case IrCmd::BUFFER_READU8:
+    case IrCmd::BUFFER_READI16:
+    case IrCmd::BUFFER_READU16:
+    case IrCmd::BUFFER_READI32:
+    case IrCmd::BUFFER_READF32:
+    case IrCmd::BUFFER_READF64:
         return true;
     default:
         break;
@@ -271,7 +280,7 @@ std::vector<uint32_t> getSortedBlockOrder(IrFunction& function);
 
 // Returns first non-dead block that comes after block at index 'i' in the sorted blocks array
 // 'dummy' block is returned if the end of array was reached
-IrBlock& getNextBlock(IrFunction& function, std::vector<uint32_t>& sortedBlocks, IrBlock& dummy, size_t i);
+IrBlock& getNextBlock(IrFunction& function, const std::vector<uint32_t>& sortedBlocks, IrBlock& dummy, size_t i);
 
 } // namespace CodeGen
 } // namespace Luau

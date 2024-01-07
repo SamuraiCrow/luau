@@ -75,6 +75,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::JUMP_CMP_INT:
     case IrCmd::JUMP_EQ_POINTER:
     case IrCmd::JUMP_CMP_NUM:
+    case IrCmd::JUMP_FORN_LOOP_COND:
     case IrCmd::JUMP_SLOT_MATCH:
         return IrValueKind::None;
     case IrCmd::TABLE_LEN:
@@ -121,6 +122,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::CHECK_SLOT_MATCH:
     case IrCmd::CHECK_NODE_NO_NEXT:
     case IrCmd::CHECK_NODE_VALUE:
+    case IrCmd::CHECK_BUFFER_LEN:
     case IrCmd::INTERRUPT:
     case IrCmd::CHECK_GC:
     case IrCmd::BARRIER_OBJ:
@@ -162,6 +164,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::BITRROTATE_UINT:
     case IrCmd::BITCOUNTLZ_UINT:
     case IrCmd::BITCOUNTRZ_UINT:
+    case IrCmd::BYTESWAP_UINT:
         return IrValueKind::Int;
     case IrCmd::INVOKE_LIBM:
         return IrValueKind::Double;
@@ -170,6 +173,21 @@ IrValueKind getCmdValueKind(IrCmd cmd)
         return IrValueKind::Pointer;
     case IrCmd::FINDUPVAL:
         return IrValueKind::Pointer;
+    case IrCmd::BUFFER_READI8:
+    case IrCmd::BUFFER_READU8:
+    case IrCmd::BUFFER_READI16:
+    case IrCmd::BUFFER_READU16:
+    case IrCmd::BUFFER_READI32:
+        return IrValueKind::Int;
+    case IrCmd::BUFFER_WRITEI8:
+    case IrCmd::BUFFER_WRITEI16:
+    case IrCmd::BUFFER_WRITEI32:
+    case IrCmd::BUFFER_WRITEF32:
+    case IrCmd::BUFFER_WRITEF64:
+        return IrValueKind::None;
+    case IrCmd::BUFFER_READF32:
+    case IrCmd::BUFFER_READF64:
+        return IrValueKind::Double;
     }
 
     LUAU_UNREACHABLE();
@@ -886,7 +904,7 @@ std::vector<uint32_t> getSortedBlockOrder(IrFunction& function)
     return sortedBlocks;
 }
 
-IrBlock& getNextBlock(IrFunction& function, std::vector<uint32_t>& sortedBlocks, IrBlock& dummy, size_t i)
+IrBlock& getNextBlock(IrFunction& function, const std::vector<uint32_t>& sortedBlocks, IrBlock& dummy, size_t i)
 {
     for (size_t j = i + 1; j < sortedBlocks.size(); ++j)
     {

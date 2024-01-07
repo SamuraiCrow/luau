@@ -12,19 +12,17 @@
 #include "Luau/TypeUtils.h"
 #include "Luau/Type.h"
 #include "Luau/VisitType.h"
-#include "Luau/TypeFamily.h"
 
 #include <algorithm>
 
 LUAU_FASTINT(LuauTypeInferTypePackLoopLimit)
 LUAU_FASTFLAG(LuauErrorRecoveryType)
 LUAU_FASTFLAGVARIABLE(LuauInstantiateInSubtyping, false)
-LUAU_FASTFLAGVARIABLE(LuauMaintainScopesInUnifier, false)
 LUAU_FASTFLAGVARIABLE(LuauTransitiveSubtyping, false)
-LUAU_FASTFLAGVARIABLE(LuauOccursIsntAlwaysFailure, false)
 LUAU_FASTFLAG(LuauAlwaysCommitInferencesOfFunctionCalls)
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 LUAU_FASTFLAGVARIABLE(LuauFixIndexerSubtypingOrdering, false)
+LUAU_FASTFLAGVARIABLE(LuauUnifierShouldNotCopyError, false)
 
 namespace Luau
 {
@@ -453,32 +451,10 @@ void Unifier::tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall, bool 
         blockedTypes.push_back(superTy);
 
     if (log.get<TypeFamilyInstanceType>(superTy))
-    {
-        // FIXME: we should be be ICEing here because the old unifier is legacy and should not interact with type families at all.
-        // Unfortunately, there are, at the time of writing, still uses of the old unifier under local type inference.
-        TypeCheckLimits limits;
-        reduceFamilies(
-            superTy, location, TypeFamilyContext{NotNull(types), builtinTypes, scope, normalizer, NotNull{sharedState.iceHandler}, NotNull{&limits}});
-        superTy = log.follow(superTy);
-    }
+        ice("Unexpected TypeFamilyInstanceType superTy");
 
     if (log.get<TypeFamilyInstanceType>(subTy))
-    {
-        // FIXME: we should be be ICEing here because the old unifier is legacy and should not interact with type families at all.
-        // Unfortunately, there are, at the time of writing, still uses of the old unifier under local type inference.
-        TypeCheckLimits limits;
-        reduceFamilies(
-            subTy, location, TypeFamilyContext{NotNull(types), builtinTypes, scope, normalizer, NotNull{sharedState.iceHandler}, NotNull{&limits}});
-        subTy = log.follow(subTy);
-    }
-
-    // If we can't reduce the families down and we still have type family types
-    // here, we are stuck. Nothing meaningful can be done here. We don't wish to
-    // report an error, either.
-    if (log.get<TypeFamilyInstanceType>(superTy) || log.get<TypeFamilyInstanceType>(subTy))
-    {
-        return;
-    }
+        ice("Unexpected TypeFamilyInstanceType subTy");
 
     auto superFree = log.getMutable<FreeType>(superTy);
     auto subFree = log.getMutable<FreeType>(subTy);
@@ -1537,7 +1513,7 @@ struct WeirdIter
         auto freePack = log.getMutable<FreeTypePack>(packId);
 
         level = freePack->level;
-        if (FFlag::LuauMaintainScopesInUnifier && freePack->scope != nullptr)
+        if (freePack->scope != nullptr)
             scope = freePack->scope;
         log.replace(packId, BoundTypePack(newTail));
         packId = newTail;
@@ -1702,11 +1678,8 @@ void Unifier::tryUnify_(TypePackId subTp, TypePackId superTp, bool isFunctionCal
         auto superIter = WeirdIter(superTp, log);
         auto subIter = WeirdIter(subTp, log);
 
-        if (FFlag::LuauMaintainScopesInUnifier)
-        {
-            superIter.scope = scope.get();
-            subIter.scope = scope.get();
-        }
+        superIter.scope = scope.get();
+        subIter.scope = scope.get();
 
         auto mkFreshType = [this](Scope* scope, TypeLevel level) {
             if (FFlag::DebugLuauDeferredConstraintResolution)
@@ -2900,7 +2873,7 @@ bool Unifier::occursCheck(TypeId needle, TypeId haystack, bool reversed)
 
     bool occurs = occursCheck(sharedState.tempSeenTy, needle, haystack);
 
-    if (occurs && FFlag::LuauOccursIsntAlwaysFailure)
+    if (occurs)
     {
         Unifier innerState = makeChildUnifier();
         if (const UnionType* ut = get<UnionType>(haystack))
@@ -2958,15 +2931,7 @@ bool Unifier::occursCheck(DenseHashSet<TypeId>& seen, TypeId needle, TypeId hays
         ice("Expected needle to be free");
 
     if (needle == haystack)
-    {
-        if (!FFlag::LuauOccursIsntAlwaysFailure)
-        {
-            reportError(location, OccursCheckFailed{});
-            log.replace(needle, *builtinTypes->errorRecoveryType());
-        }
-
         return true;
-    }
 
     if (log.getMutable<FreeType>(haystack) || (hideousFixMeGenericsAreActuallyFree && log.is<GenericType>(haystack)))
         return false;
@@ -2990,10 +2955,13 @@ bool Unifier::occursCheck(TypePackId needle, TypePackId haystack, bool reversed)
 
     bool occurs = occursCheck(sharedState.tempSeenTp, needle, haystack);
 
-    if (occurs && FFlag::LuauOccursIsntAlwaysFailure)
+    if (occurs)
     {
         reportError(location, OccursCheckFailed{});
-        log.replace(needle, *builtinTypes->errorRecoveryTypePack());
+        if (FFlag::LuauUnifierShouldNotCopyError)
+            log.replace(needle, BoundTypePack{builtinTypes->errorRecoveryTypePack()});
+        else
+            log.replace(needle, *builtinTypes->errorRecoveryTypePack());
     }
 
     return occurs;
@@ -3020,15 +2988,7 @@ bool Unifier::occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, Typ
     while (!log.getMutable<ErrorType>(haystack))
     {
         if (needle == haystack)
-        {
-            if (!FFlag::LuauOccursIsntAlwaysFailure)
-            {
-                reportError(location, OccursCheckFailed{});
-                log.replace(needle, *builtinTypes->errorRecoveryTypePack());
-            }
-
             return true;
-        }
 
         if (auto a = get<TypePack>(haystack); a && a->tail)
         {

@@ -130,6 +130,49 @@ end
 
 assert(pcall(fuzzfail13) == true)
 
+local function fuzzfail14()
+  for l0=771751936,_ do
+    for l0=771751936,0 do
+      while 538970624 do
+      end
+    end
+  end
+end
+
+assert(pcall(fuzzfail14) == false)
+
+local function fuzzfail15()
+  local a
+  if a then
+    repeat until a
+  else
+    local b = `{a}`
+    a = nil
+  end
+end
+
+assert(pcall(fuzzfail15) == true)
+
+local function fuzzfail16()
+  _ = {[{[2]=77,_=_,[2]=_,}]=not _,}
+  _ = {77,[2]=11008,[2]=_,[0]=_,}
+end
+
+assert(pcall(fuzzfail16) == true)
+
+local function fuzzfail17()
+  return bit32.extract(1293942816,1293942816)
+end
+
+assert(pcall(fuzzfail17) == false)
+
+local function fuzzfail18()
+	return bit32.extract(7890276,0)
+end
+
+assert(pcall(fuzzfail18) == true)
+assert(fuzzfail18() == 0)
+
 local function arraySizeInv1()
   local t = {1, 2, nil, nil, nil, nil, nil, nil, nil, true}
 
@@ -231,5 +274,23 @@ function arrayIndexingSpecialNumbers1(a, b, c)
 end
 
 assert(arrayIndexingSpecialNumbers1(1, 256, 65536) == 3456789)
+
+function loopIteratorProtocol(a, t)
+  local sum = 0
+
+  do
+    local a, b, c, d, e, f, g = {}, {}, {}, {}, {}, {}, {}
+  end
+
+  for k, v in ipairs(t) do
+    if k == 10 then sum += math.abs('-8') end
+
+    sum += k
+  end
+
+  return sum
+end
+
+assert(loopIteratorProtocol(0, table.create(100, 5)) == 5058)
 
 return('OK')

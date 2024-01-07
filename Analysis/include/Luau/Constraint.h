@@ -4,8 +4,8 @@
 #include "Luau/Ast.h" // Used for some of the enumerations
 #include "Luau/DenseHash.h"
 #include "Luau/NotNull.h"
-#include "Luau/Type.h"
 #include "Luau/Variant.h"
+#include "Luau/TypeFwd.h"
 
 #include <string>
 #include <memory>
@@ -15,12 +15,6 @@ namespace Luau
 {
 
 struct Scope;
-
-struct Type;
-using TypeId = const Type*;
-
-struct TypePackVar;
-using TypePackId = const TypePackVar*;
 
 // subType <: superType
 struct SubtypeConstraint
@@ -55,33 +49,8 @@ struct InstantiationConstraint
     TypeId superType;
 };
 
-struct UnaryConstraint
-{
-    AstExprUnary::Op op;
-    TypeId operandType;
-    TypeId resultType;
-};
-
-// let L : leftType
-// let R : rightType
-// in
-//     L op R : resultType
-struct BinaryConstraint
-{
-    AstExprBinary::Op op;
-    TypeId leftType;
-    TypeId rightType;
-    TypeId resultType;
-
-    // When we dispatch this constraint, we update the key at this map to record
-    // the overload that we selected.
-    const AstNode* astFragment;
-    DenseHashMap<const AstNode*, TypeId>* astOriginalCallTypes;
-    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes;
-};
-
-// iteratee is iterable
-// iterators is the iteration types.
+// variables ~ iterate iterator
+// Unpack the iterator, figure out what types it iterates over, and bind those types to variables.
 struct IterableConstraint
 {
     TypePackId iterator;
@@ -221,13 +190,18 @@ struct UnpackConstraint
 {
     TypePackId resultPack;
     TypePackId sourcePack;
+
+    // UnpackConstraint is sometimes used to resolve the types of assignments.
+    // When this is the case, any LocalTypes in resultPack can have their
+    // domains extended by the corresponding type from sourcePack.
+    bool resultIsLValue = false;
 };
 
-// resultType ~ refine type mode discriminant
+// resultType ~ T0 op T1 op ... op TN
 //
-// Compute type & discriminant (or type | discriminant) as soon as possible (but
-// no sooner), simplify, and bind resultType to that type.
-struct RefineConstraint
+// op is either union or intersection.  If any of the input types are blocked,
+// this constraint will block unless forced.
+struct SetOpConstraint
 {
     enum
     {
@@ -236,9 +210,7 @@ struct RefineConstraint
     } mode;
 
     TypeId resultType;
-
-    TypeId type;
-    TypeId discriminant;
+    std::vector<TypeId> types;
 };
 
 // ty ~ reduce ty
@@ -257,10 +229,9 @@ struct ReducePackConstraint
     TypePackId tp;
 };
 
-using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
-    BinaryConstraint, IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint,
-    HasPropConstraint, SetPropConstraint, SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint, RefineConstraint, ReduceConstraint,
-    ReducePackConstraint>;
+using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, IterableConstraint,
+    NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint, HasPropConstraint, SetPropConstraint,
+    SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint, SetOpConstraint, ReduceConstraint, ReducePackConstraint>;
 
 struct Constraint
 {
@@ -274,6 +245,8 @@ struct Constraint
     ConstraintV c;
 
     std::vector<NotNull<Constraint>> dependencies;
+
+    DenseHashSet<TypeId> getFreeTypes() const;
 };
 
 using ConstraintPtr = std::unique_ptr<Constraint>;

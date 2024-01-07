@@ -33,10 +33,23 @@ enum class CompileFormat
     Null
 };
 
+enum class RecordStats
+{
+    None,
+    Total,
+    File,
+    Function
+};
+
 struct GlobalOptions
 {
     int optimizationLevel = 1;
     int debugLevel = 1;
+
+    std::string vectorLib;
+    std::string vectorCtor;
+    std::string vectorType;
+
 } globalOptions;
 
 static Luau::CompileOptions copts()
@@ -44,6 +57,11 @@ static Luau::CompileOptions copts()
     Luau::CompileOptions result = {};
     result.optimizationLevel = globalOptions.optimizationLevel;
     result.debugLevel = globalOptions.debugLevel;
+
+    // globalOptions outlive the CompileOptions, so it's safe to use string data pointers here
+    result.vectorLib = globalOptions.vectorLib.c_str();
+    result.vectorCtor = globalOptions.vectorCtor.c_str();
+    result.vectorType = globalOptions.vectorType.c_str();
 
     return result;
 }
@@ -113,6 +131,7 @@ struct CompileStats
 {
     size_t lines;
     size_t bytecode;
+    size_t bytecodeInstructionCount;
     size_t codegen;
 
     double readTime;
@@ -122,6 +141,79 @@ struct CompileStats
     double codegenTime;
 
     Luau::CodeGen::LoweringStats lowerStats;
+
+    void serializeToJson(FILE* fp)
+    {
+        // use compact one-line formatting to reduce file length
+        fprintf(fp, "{\
+\"lines\": %zu, \
+\"bytecode\": %zu, \
+\"bytecodeInstructionCount\": %zu, \
+\"codegen\": %zu, \
+\"readTime\": %f, \
+\"miscTime\": %f, \
+\"parseTime\": %f, \
+\"compileTime\": %f, \
+\"codegenTime\": %f, \
+\"lowerStats\": {\
+\"totalFunctions\": %u, \
+\"skippedFunctions\": %u, \
+\"spillsToSlot\": %d, \
+\"spillsToRestore\": %d, \
+\"maxSpillSlotsUsed\": %u, \
+\"blocksPreOpt\": %u, \
+\"blocksPostOpt\": %u, \
+\"maxBlockInstructions\": %u, \
+\"regAllocErrors\": %d, \
+\"loweringErrors\": %d\
+}, \
+\"blockLinearizationStats\": {\
+\"constPropInstructionCount\": %u, \
+\"timeSeconds\": %f\
+}",
+            lines, bytecode, bytecodeInstructionCount, codegen, readTime, miscTime, parseTime, compileTime, codegenTime, lowerStats.totalFunctions,
+            lowerStats.skippedFunctions, lowerStats.spillsToSlot, lowerStats.spillsToRestore, lowerStats.maxSpillSlotsUsed, lowerStats.blocksPreOpt,
+            lowerStats.blocksPostOpt, lowerStats.maxBlockInstructions, lowerStats.regAllocErrors, lowerStats.loweringErrors,
+            lowerStats.blockLinearizationStats.constPropInstructionCount, lowerStats.blockLinearizationStats.timeSeconds);
+        if (lowerStats.collectFunctionStats)
+        {
+            fprintf(fp, ", \"functions\": [");
+            auto functionCount = lowerStats.functions.size();
+            for (size_t i = 0; i < functionCount; ++i)
+            {
+                const Luau::CodeGen::FunctionStats& fstat = lowerStats.functions[i];
+                fprintf(fp, "{\"name\": \"%s\", \"line\": %d, \"bcodeCount\": %u, \"irCount\": %u, \"asmCount\": %u}", fstat.name.c_str(), fstat.line,
+                    fstat.bcodeCount, fstat.irCount, fstat.asmCount);
+                if (i < functionCount - 1)
+                    fprintf(fp, ", ");
+            }
+            fprintf(fp, "]");
+        }
+        fprintf(fp, "}");
+    }
+
+    CompileStats& operator+=(const CompileStats& that)
+    {
+        this->lines += that.lines;
+        this->bytecode += that.bytecode;
+        this->bytecodeInstructionCount += that.bytecodeInstructionCount;
+        this->codegen += that.codegen;
+        this->readTime += that.readTime;
+        this->miscTime += that.miscTime;
+        this->parseTime += that.parseTime;
+        this->compileTime += that.compileTime;
+        this->codegenTime += that.codegenTime;
+        this->lowerStats += that.lowerStats;
+
+        return *this;
+    }
+
+    CompileStats operator+(const CompileStats& other) const
+    {
+        CompileStats result(*this);
+        result += other;
+        return result;
+    }
 };
 
 static double recordDeltaTime(double& timer)
@@ -199,6 +291,7 @@ static bool compileFile(const char* name, CompileFormat format, Luau::CodeGen::A
 
         Luau::compileOrThrow(bcb, result, names, copts());
         stats.bytecode += bcb.getBytecode().size();
+        stats.bytecodeInstructionCount = bcb.getTotalInstructionCount();
         stats.compileTime += recordDeltaTime(currts);
 
         switch (format)
@@ -254,12 +347,41 @@ static void displayHelp(const char* argv0)
     printf("  -g<n>: compile with debug level n (default 1, n should be between 0 and 2).\n");
     printf("  --target=<target>: compile code for specific architecture (a64, x64, a64_nf, x64_ms).\n");
     printf("  --timetrace: record compiler time tracing information into trace.json\n");
+    printf("  --stats-file=<filename>: file in which compilation stats will be recored (default 'stats.json').\n");
+    printf("  --record-stats=<granularity>: granularity of compilation stats recorded in stats.json (total, file, function).\n");
+    printf("  --vector-lib=<name>: name of the library providing vector type operations.\n");
+    printf("  --vector-ctor=<name>: name of the function constructing a vector value.\n");
+    printf("  --vector-type=<name>: name of the vector type.\n");
 }
 
 static int assertionHandler(const char* expr, const char* file, int line, const char* function)
 {
     printf("%s(%d): ASSERTION FAILED: %s\n", file, line, expr);
     return 1;
+}
+
+std::string escapeFilename(const std::string& filename)
+{
+    std::string escaped;
+    escaped.reserve(filename.size());
+
+    for (const char ch : filename)
+    {
+        switch (ch)
+        {
+        case '\\':
+            escaped.push_back('/');
+            break;
+        case '"':
+            escaped.push_back('\\');
+            escaped.push_back(ch);
+            break;
+        default:
+            escaped.push_back(ch);
+        }
+    }
+
+    return escaped;
 }
 
 int main(int argc, char** argv)
@@ -270,6 +392,8 @@ int main(int argc, char** argv)
 
     CompileFormat compileFormat = CompileFormat::Text;
     Luau::CodeGen::AssemblyOptions::Target assemblyTarget = Luau::CodeGen::AssemblyOptions::Host;
+    RecordStats recordStats = RecordStats::None;
+    std::string statsFile("stats.json");
 
     for (int i = 1; i < argc; i++)
     {
@@ -320,9 +444,47 @@ int main(int argc, char** argv)
         {
             FFlag::DebugLuauTimeTracing.value = true;
         }
+        else if (strncmp(argv[i], "--record-stats=", 15) == 0)
+        {
+            const char* value = argv[i] + 15;
+
+            if (strcmp(value, "total") == 0)
+                recordStats = RecordStats::Total;
+            else if (strcmp(value, "file") == 0)
+                recordStats = RecordStats::File;
+            else if (strcmp(value, "function") == 0)
+                recordStats = RecordStats::Function;
+            else
+            {
+                fprintf(stderr, "Error: unknown 'granularity' for '--record-stats'\n");
+                return 1;
+            }
+        }
+        else if (strncmp(argv[i], "--stats-file=", 13) == 0)
+        {
+            statsFile = argv[i] + 13;
+
+            if (statsFile.size() == 0)
+            {
+                fprintf(stderr, "Error: filename missing for '--stats-file'.\n\n");
+                return 1;
+            }
+        }
         else if (strncmp(argv[i], "--fflags=", 9) == 0)
         {
             setLuauFlags(argv[i] + 9);
+        }
+        else if (strncmp(argv[i], "--vector-lib=", 13) == 0)
+        {
+            globalOptions.vectorLib = argv[i] + 13;
+        }
+        else if (strncmp(argv[i], "--vector-ctor=", 14) == 0)
+        {
+            globalOptions.vectorCtor = argv[i] + 14;
+        }
+        else if (strncmp(argv[i], "--vector-type=", 14) == 0)
+        {
+            globalOptions.vectorType = argv[i] + 14;
         }
         else if (argv[i][0] == '-' && argv[i][1] == '-' && getCompileFormat(argv[i] + 2))
         {
@@ -351,11 +513,24 @@ int main(int argc, char** argv)
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
+    const size_t fileCount = files.size();
     CompileStats stats = {};
+
+    std::vector<CompileStats> fileStats;
+    if (recordStats == RecordStats::File || recordStats == RecordStats::Function)
+        fileStats.reserve(fileCount);
+
     int failed = 0;
 
     for (const std::string& path : files)
-        failed += !compileFile(path.c_str(), compileFormat, assemblyTarget, stats);
+    {
+        CompileStats fileStat = {};
+        fileStat.lowerStats.collectFunctionStats = (recordStats == RecordStats::Function);
+        failed += !compileFile(path.c_str(), compileFormat, assemblyTarget, fileStat);
+        stats += fileStat;
+        if (recordStats == RecordStats::File || recordStats == RecordStats::Function)
+            fileStats.push_back(fileStat);
+    }
 
     if (compileFormat == CompileFormat::Null)
     {
@@ -372,6 +547,36 @@ int main(int argc, char** argv)
         printf("Lowering: regalloc failed: %d, lowering failed %d; spills to stack: %d, spills to restore: %d, max spill slot %u\n",
             stats.lowerStats.regAllocErrors, stats.lowerStats.loweringErrors, stats.lowerStats.spillsToSlot, stats.lowerStats.spillsToRestore,
             stats.lowerStats.maxSpillSlotsUsed);
+    }
+
+    if (recordStats != RecordStats::None)
+    {
+        FILE* fp = fopen(statsFile.c_str(), "w");
+
+        if (!fp)
+        {
+            fprintf(stderr, "Unable to open 'stats.json'\n");
+            return 1;
+        }
+
+        if (recordStats == RecordStats::Total)
+        {
+            stats.serializeToJson(fp);
+        }
+        else if (recordStats == RecordStats::File || recordStats == RecordStats::Function)
+        {
+            fprintf(fp, "{\n");
+            for (size_t i = 0; i < fileCount; ++i)
+            {
+                std::string escaped(escapeFilename(files[i]));
+                fprintf(fp, "\"%s\": ", escaped.c_str());
+                fileStats[i].serializeToJson(fp);
+                fprintf(fp, i == (fileCount - 1) ? "\n" : ",\n");
+            }
+            fprintf(fp, "}");
+        }
+
+        fclose(fp);
     }
 
     return failed ? 1 : 0;

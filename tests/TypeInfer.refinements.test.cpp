@@ -289,7 +289,7 @@ TEST_CASE_FIXTURE(Fixture, "type_assertion_expr_carry_its_constraints")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "typeguard_in_if_condition_position")
 {
-    CheckResult result1 = check(R"(
+    CheckResult result = check(R"(
         function f(s: any, t: unknown)
             if type(s) == "number" then
                 local n = s
@@ -300,7 +300,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "typeguard_in_if_condition_position")
         end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result1);
+    LUAU_REQUIRE_NO_ERRORS(result);
 
     // DCR changes refinements to preserve error suppression.
     if (FFlag::DebugLuauDeferredConstraintResolution)
@@ -1540,6 +1540,23 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "refine_thread")
     CHECK_EQ("number", toString(requireTypeAtPosition({5, 28})));
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "refine_buffer")
+{
+    CheckResult result = check(R"(
+        local function f(x: number | buffer)
+            if typeof(x) == "buffer" then
+                local foo = x
+            else
+                local foo = x
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ("buffer", toString(requireTypeAtPosition({3, 28})));
+    CHECK_EQ("number", toString(requireTypeAtPosition({5, 28})));
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "falsiness_of_TruthyPredicate_narrows_into_nil")
 {
     CheckResult result = check(R"(
@@ -1838,7 +1855,9 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_annotations_arent_relevant_when_doing_d
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "function_call_with_colon_after_refining_not_to_be_nil")
 {
-    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    // don't run this test at all without DCR
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
 
     CheckResult result = check(R"(
         --!strict
@@ -1904,31 +1923,27 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "many_refinements_on_val")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "refine_unknown_to_table")
 {
-    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
     // this test is DCR-only as an instance of DCR fixing a bug in the old solver
 
     CheckResult result = check(R"(
-        local a : unknown = nil
-
-        local idx, val
-
-        if typeof(a) == "table" then
-            for i, v in a do
-                idx = i
-                val = v
+        local function f(a: unknown)
+            if typeof(a) == "table" then
+                for i, v in a do
+                    return i, v
+                end
             end
         end
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("unknown", toString(requireType("idx")));
-    CHECK_EQ("unknown", toString(requireType("val")));
+    CHECK_EQ("(unknown) -> (unknown, unknown)", toString(requireType("f")));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "conditional_refinement_should_stay_error_suppressing")
 {
-    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
     // this test is DCR-only as an instance of DCR fixing a bug in the old solver
 
     CheckResult result = check(R"(
@@ -1990,6 +2005,19 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "globals_can_be_narrowed_too")
     )");
 
     CHECK("never" == toString(requireTypeAtPosition(Position{2, 24})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "ex")
+{
+    CheckResult result = check(R"(
+local function f(x: string | number)
+    if typeof((x)) == "string" then
+        local y = x
+    end
+end
+)");
+    TypeId t = requireTypeAtPosition({3, 18});
+    CHECK("string" == toString(t));
 }
 
 TEST_SUITE_END();

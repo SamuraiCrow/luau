@@ -214,6 +214,8 @@ typedef struct global_State
 
     void (*udatagc[LUA_UTAG_LIMIT])(lua_State*, void*); // for each userdata tag, a gc callback to be called immediately before freeing memory
 
+    TString* lightuserdataname[LUA_LUTAG_LIMIT]; // names for tagged lightuserdata
+
     GCStats gcstats;
 
 #ifdef LUAI_GCMETRICS
@@ -282,6 +284,7 @@ union GCObject
     struct Proto p;
     struct UpVal uv;
     struct lua_State th; // thread
+    struct Buffer buf;
 };
 
 // macros to convert a GCObject into a specific value
@@ -292,6 +295,7 @@ union GCObject
 #define gco2p(o) check_exp((o)->gch.tt == LUA_TPROTO, &((o)->p))
 #define gco2uv(o) check_exp((o)->gch.tt == LUA_TUPVAL, &((o)->uv))
 #define gco2th(o) check_exp((o)->gch.tt == LUA_TTHREAD, &((o)->th))
+#define gco2buf(o) check_exp((o)->gch.tt == LUA_TBUFFER, &((o)->buf))
 
 // macro to convert any Lua object into a GCObject
 #define obj2gco(v) check_exp(iscollectable(v), cast_to(GCObject*, (v) + 0))

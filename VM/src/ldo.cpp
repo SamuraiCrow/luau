@@ -407,7 +407,7 @@ static void resume_handle(lua_State* L, void* ud)
     L->ci = restoreci(L, old_ci);
 
     // close eventual pending closures; this means it's now safe to restore stack
-    luaF_close(L, L->base);
+    luaF_close(L, L->ci->base);
 
     // finish cont call and restore stack to previous ci top
     luau_poscall(L, L->top - n);

@@ -23,6 +23,10 @@
 LUAU_FASTFLAG(DebugCodegenNoOpt)
 LUAU_FASTFLAG(DebugCodegenOptSize)
 LUAU_FASTFLAG(DebugCodegenSkipNumbering)
+LUAU_FASTINT(CodegenHeuristicsInstructionLimit)
+LUAU_FASTINT(CodegenHeuristicsBlockLimit)
+LUAU_FASTINT(CodegenHeuristicsBlockInstructionLimit)
+LUAU_FASTFLAG(LuauKeepVmapLinear2)
 
 namespace Luau
 {
@@ -47,11 +51,17 @@ inline void gatherFunctions(std::vector<Proto*>& results, Proto* proto, unsigned
         gatherFunctions(results, proto->p[i], flags);
 }
 
-template<typename AssemblyBuilder, typename IrLowering>
-inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& function, int bytecodeid, AssemblyOptions options)
+inline unsigned getInstructionCount(const std::vector<IrInst>& instructions, IrCmd cmd)
 {
-    std::vector<uint32_t> sortedBlocks = getSortedBlockOrder(function);
+    return unsigned(std::count_if(instructions.begin(), instructions.end(), [&cmd](const IrInst& inst) {
+        return inst.cmd == cmd;
+    }));
+}
 
+template<typename AssemblyBuilder, typename IrLowering>
+inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& function, const std::vector<uint32_t>& sortedBlocks, int bytecodeid,
+    AssemblyOptions options)
+{
     // For each IR instruction that begins a bytecode instruction, which bytecode instruction is it?
     std::vector<uint32_t> bcLocations(function.instructions.size() + 1, ~0u);
 
@@ -103,8 +113,16 @@ inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
             toStringDetailed(ctx, block, blockIndex, /* includeUseInfo */ true);
         }
 
-        // Values can only reference restore operands in the current block
-        function.validRestoreOpBlockIdx = blockIndex;
+        if (FFlag::LuauKeepVmapLinear2)
+        {
+            // Values can only reference restore operands in the current block chain
+            function.validRestoreOpBlocks.push_back(blockIndex);
+        }
+        else
+        {
+            // Values can only reference restore operands in the current block
+            function.validRestoreOpBlockIdx = blockIndex;
+        }
 
         build.setLabel(block.label);
 
@@ -130,6 +148,15 @@ inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
             if (outputEnabled && options.annotator && bcLocation != ~0u)
             {
                 options.annotator(options.annotatorContext, build.text, bytecodeid, bcLocation);
+
+                // If available, report inferred register tags
+                BytecodeTypes bcTypes = function.getBytecodeTypesAt(bcLocation);
+
+                if (bcTypes.result != LBC_TYPE_ANY || bcTypes.a != LBC_TYPE_ANY || bcTypes.b != LBC_TYPE_ANY || bcTypes.c != LBC_TYPE_ANY)
+                {
+                    toString(ctx.result, bcTypes);
+                    build.logAppend("\n");
+                }
             }
 
             // If bytecode needs the location of this instruction for jumps, record it
@@ -181,6 +208,9 @@ inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
 
         if (options.includeIr)
             build.logAppend("#\n");
+
+        if (FFlag::LuauKeepVmapLinear2 && block.expectedNextBlock == ~0u)
+            function.validRestoreOpBlocks.clear();
     }
 
     if (!seenFallback)
@@ -202,28 +232,52 @@ inline bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
     return true;
 }
 
-inline bool lowerIr(
-    X64::AssemblyBuilderX64& build, IrBuilder& ir, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options, LoweringStats* stats)
+inline bool lowerIr(X64::AssemblyBuilderX64& build, IrBuilder& ir, const std::vector<uint32_t>& sortedBlocks, ModuleHelpers& helpers, Proto* proto,
+    AssemblyOptions options, LoweringStats* stats)
 {
     optimizeMemoryOperandsX64(ir.function);
 
     X64::IrLoweringX64 lowering(build, helpers, ir.function, stats);
 
-    return lowerImpl(build, lowering, ir.function, proto->bytecodeid, options);
+    return lowerImpl(build, lowering, ir.function, sortedBlocks, proto->bytecodeid, options);
 }
 
-inline bool lowerIr(
-    A64::AssemblyBuilderA64& build, IrBuilder& ir, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options, LoweringStats* stats)
+inline bool lowerIr(A64::AssemblyBuilderA64& build, IrBuilder& ir, const std::vector<uint32_t>& sortedBlocks, ModuleHelpers& helpers, Proto* proto,
+    AssemblyOptions options, LoweringStats* stats)
 {
     A64::IrLoweringA64 lowering(build, helpers, ir.function, stats);
 
-    return lowerImpl(build, lowering, ir.function, proto->bytecodeid, options);
+    return lowerImpl(build, lowering, ir.function, sortedBlocks, proto->bytecodeid, options);
 }
 
 template<typename AssemblyBuilder>
 inline bool lowerFunction(IrBuilder& ir, AssemblyBuilder& build, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options, LoweringStats* stats)
 {
     killUnusedBlocks(ir.function);
+
+    unsigned preOptBlockCount = 0;
+    unsigned maxBlockInstructions = 0;
+
+    for (const IrBlock& block : ir.function.blocks)
+    {
+        preOptBlockCount += (block.kind != IrBlockKind::Dead);
+        unsigned blockInstructions = block.finish - block.start;
+        maxBlockInstructions = std::max(maxBlockInstructions, blockInstructions);
+    }
+
+    // we update stats before checking the heuristic so that even if we bail out
+    // our stats include information about the limit that was exceeded.
+    if (stats)
+    {
+        stats->blocksPreOpt += preOptBlockCount;
+        stats->maxBlockInstructions = maxBlockInstructions;
+    }
+
+    if (preOptBlockCount >= unsigned(FInt::CodegenHeuristicsBlockLimit.value))
+        return false;
+
+    if (maxBlockInstructions >= unsigned(FInt::CodegenHeuristicsBlockInstructionLimit.value))
+        return false;
 
     computeCfgInfo(ir.function);
 
@@ -234,10 +288,42 @@ inline bool lowerFunction(IrBuilder& ir, AssemblyBuilder& build, ModuleHelpers& 
         constPropInBlockChains(ir, useValueNumbering);
 
         if (!FFlag::DebugCodegenOptSize)
+        {
+            double startTime = 0.0;
+            unsigned constPropInstructionCount = 0;
+
+            if (stats)
+            {
+                constPropInstructionCount = getInstructionCount(ir.function.instructions, IrCmd::SUBSTITUTE);
+                startTime = lua_clock();
+            }
+
             createLinearBlocks(ir, useValueNumbering);
+
+            if (stats)
+            {
+                stats->blockLinearizationStats.timeSeconds += lua_clock() - startTime;
+                constPropInstructionCount = getInstructionCount(ir.function.instructions, IrCmd::SUBSTITUTE) - constPropInstructionCount;
+                stats->blockLinearizationStats.constPropInstructionCount += constPropInstructionCount;
+            }
+        }
     }
 
-    return lowerIr(build, ir, helpers, proto, options, stats);
+    std::vector<uint32_t> sortedBlocks = getSortedBlockOrder(ir.function);
+
+    // In order to allocate registers during lowering, we need to know where instruction results are last used
+    updateLastUseLocations(ir.function, sortedBlocks);
+
+    if (stats)
+    {
+        for (const IrBlock& block : ir.function.blocks)
+        {
+            if (block.kind != IrBlockKind::Dead)
+                ++stats->blocksPostOpt;
+        }
+    }
+
+    return lowerIr(build, ir, sortedBlocks, helpers, proto, options, stats);
 }
 
 } // namespace CodeGen

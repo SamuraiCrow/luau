@@ -22,6 +22,7 @@
 static const char* mainModuleName = "MainModule";
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(DebugLuauFreezeArena);
 
 extern std::optional<unsigned> randomSeed; // tests/main.cpp
 
@@ -136,7 +137,7 @@ const Config& TestConfigResolver::getConfig(const ModuleName& name) const
 }
 
 Fixture::Fixture(bool freeze, bool prepareAutocomplete)
-    : sff_DebugLuauFreezeArena("DebugLuauFreezeArena", freeze)
+    : sff_DebugLuauFreezeArena(FFlag::DebugLuauFreezeArena, freeze)
     , frontend(&fileResolver, &configResolver,
           {/* retainFullTypeGraphs= */ true, /* forAutocomplete */ false, /* runLintChecks */ false, /* randomConstraintResolutionSeed */ randomSeed})
     , builtinTypes(frontend.builtinTypes)
@@ -174,7 +175,8 @@ AstStatBlock* Fixture::parse(const std::string& source, const ParseOptions& pars
         {
             if (FFlag::DebugLuauDeferredConstraintResolution)
             {
-                ModulePtr module = Luau::check(*sourceModule, {}, builtinTypes, NotNull{&ice}, NotNull{&moduleResolver}, NotNull{&fileResolver},
+                Mode mode = sourceModule->mode ? *sourceModule->mode : Mode::Strict;
+                ModulePtr module = Luau::check(*sourceModule, mode, {}, builtinTypes, NotNull{&ice}, NotNull{&moduleResolver}, NotNull{&fileResolver},
                     frontend.globals.globalScope, /*prepareModuleScope*/ nullptr, frontend.options, {});
 
                 Luau::lint(sourceModule->root, *sourceModule->names, frontend.globals.globalScope, module.get(), sourceModule->hotcomments, {});
@@ -194,7 +196,7 @@ AstStatBlock* Fixture::parse(const std::string& source, const ParseOptions& pars
     return result.root;
 }
 
-CheckResult Fixture::check(Mode mode, std::string source)
+CheckResult Fixture::check(Mode mode, const std::string& source)
 {
     ModuleName mm = fromString(mainModuleName);
     configResolver.defaultConfig.mode = mode;
@@ -411,7 +413,7 @@ TypeId Fixture::requireTypeAlias(const std::string& name)
 {
     std::optional<TypeId> ty = lookupType(name);
     REQUIRE(ty);
-    return *ty;
+    return follow(*ty);
 }
 
 TypeId Fixture::requireExportedType(const ModuleName& moduleName, const std::string& name)

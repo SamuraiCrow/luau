@@ -101,7 +101,7 @@
         VM_DISPATCH_OP(LOP_FORGLOOP), VM_DISPATCH_OP(LOP_FORGPREP_INEXT), VM_DISPATCH_OP(LOP_DEP_FORGLOOP_INEXT), VM_DISPATCH_OP(LOP_FORGPREP_NEXT), \
         VM_DISPATCH_OP(LOP_NATIVECALL), VM_DISPATCH_OP(LOP_GETVARARGS), VM_DISPATCH_OP(LOP_DUPCLOSURE), VM_DISPATCH_OP(LOP_PREPVARARGS), \
         VM_DISPATCH_OP(LOP_LOADKX), VM_DISPATCH_OP(LOP_JUMPX), VM_DISPATCH_OP(LOP_FASTCALL), VM_DISPATCH_OP(LOP_COVERAGE), \
-        VM_DISPATCH_OP(LOP_CAPTURE), VM_DISPATCH_OP(LOP_DEP_JUMPIFEQK), VM_DISPATCH_OP(LOP_DEP_JUMPIFNOTEQK), VM_DISPATCH_OP(LOP_FASTCALL1), \
+        VM_DISPATCH_OP(LOP_CAPTURE), VM_DISPATCH_OP(LOP_SUBRK), VM_DISPATCH_OP(LOP_DIVRK), VM_DISPATCH_OP(LOP_FASTCALL1), \
         VM_DISPATCH_OP(LOP_FASTCALL2), VM_DISPATCH_OP(LOP_FASTCALL2K), VM_DISPATCH_OP(LOP_FORGPREP), VM_DISPATCH_OP(LOP_JUMPXEQKNIL), \
         VM_DISPATCH_OP(LOP_JUMPXEQKB), VM_DISPATCH_OP(LOP_JUMPXEQKN), VM_DISPATCH_OP(LOP_JUMPXEQKS), VM_DISPATCH_OP(LOP_IDIV), \
         VM_DISPATCH_OP(LOP_IDIVK),
@@ -135,7 +135,7 @@
 // Does VM support native execution via ExecutionCallbacks? We mostly assume it does but keep the define to make it easy to quantify the cost.
 #define VM_HAS_NATIVE 1
 
-void (*lua_iter_call_telemetry)(lua_State* L, int gtt, int stt, int itt) = NULL;
+LUAU_FASTFLAGVARIABLE(LuauTaggedLuData, false)
 
 LUAU_NOINLINE void luau_callhook(lua_State* L, lua_Hook hook, void* userdata)
 {
@@ -523,7 +523,7 @@ reentry:
 
                         if (unsigned(ic) < LUA_VECTOR_SIZE && name[1] == '\0')
                         {
-                            const float* v = rb->value.v; // silences ubsan when indexing v[]
+                            const float* v = vvalue(rb); // silences ubsan when indexing v[]
                             setnvalue(ra, v[ic]);
                             VM_NEXT();
                         }
@@ -1112,7 +1112,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += pvalue(ra) == pvalue(rb) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) == pvalue(rb) && (!FFlag::LuauTaggedLuData || lightuserdatatag(ra) == lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -1129,6 +1129,7 @@ reentry:
                     case LUA_TSTRING:
                     case LUA_TFUNCTION:
                     case LUA_TTHREAD:
+                    case LUA_TBUFFER:
                         pc += gcvalue(ra) == gcvalue(rb) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
@@ -1226,7 +1227,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += pvalue(ra) != pvalue(rb) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) != pvalue(rb) || (FFlag::LuauTaggedLuData && lightuserdatatag(ra) != lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -1243,6 +1244,7 @@ reentry:
                     case LUA_TSTRING:
                     case LUA_TFUNCTION:
                     case LUA_TTHREAD:
+                    case LUA_TBUFFER:
                         pc += gcvalue(ra) != gcvalue(rb) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
@@ -1464,8 +1466,8 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] + vc[0], vb[1] + vc[1], vb[2] + vc[2], vb[3] + vc[3]);
                     VM_NEXT();
                 }
@@ -1510,8 +1512,8 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] - vc[0], vb[1] - vc[1], vb[2] - vc[2], vb[3] - vc[3]);
                     VM_NEXT();
                 }
@@ -1556,22 +1558,22 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(rc));
                     setvvalue(ra, vb[0] * vc, vb[1] * vc, vb[2] * vc, vb[3] * vc);
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] * vc[0], vb[1] * vc[1], vb[2] * vc[2], vb[3] * vc[3]);
                     VM_NEXT();
                 }
                 else if (ttisnumber(rb) && ttisvector(rc))
                 {
                     float vb = cast_to(float, nvalue(rb));
-                    const float* vc = rc->value.v;
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb * vc[0], vb * vc[1], vb * vc[2], vb * vc[3]);
                     VM_NEXT();
                 }
@@ -1617,22 +1619,22 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(rc));
                     setvvalue(ra, vb[0] / vc, vb[1] / vc, vb[2] / vc, vb[3] / vc);
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] / vc[0], vb[1] / vc[1], vb[2] / vc[2], vb[3] / vc[3]);
                     VM_NEXT();
                 }
                 else if (ttisnumber(rb) && ttisvector(rc))
                 {
                     float vb = cast_to(float, nvalue(rb));
-                    const float* vc = rc->value.v;
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb / vc[0], vb / vc[1], vb / vc[2], vb / vc[3]);
                     VM_NEXT();
                 }
@@ -1812,7 +1814,7 @@ reentry:
                 }
                 else if (ttisvector(rb))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(kv));
                     setvvalue(ra, vb[0] * vc, vb[1] * vc, vb[2] * vc, vb[3] * vc);
                     VM_NEXT();
@@ -1858,9 +1860,9 @@ reentry:
                 }
                 else if (ttisvector(rb))
                 {
-                    const float* vb = rb->value.v;
-                    float vc = cast_to(float, nvalue(kv));
-                    setvvalue(ra, vb[0] / vc, vb[1] / vc, vb[2] / vc, vb[3] / vc);
+                    const float* vb = vvalue(rb);
+                    float nc = cast_to(float, nvalue(kv));
+                    setvvalue(ra, vb[0] / nc, vb[1] / nc, vb[2] / nc, vb[3] / nc);
                     VM_NEXT();
                 }
                 else
@@ -2071,7 +2073,7 @@ reentry:
                 }
                 else if (ttisvector(rb))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     setvvalue(ra, -vb[0], -vb[1], -vb[2], -vb[3]);
                     VM_NEXT();
                 }
@@ -2291,16 +2293,12 @@ reentry:
                     {
                         // table or userdata with __call, will be called during FORGLOOP
                         // TODO: we might be able to stop supporting this depending on whether it's used in practice
-                        void (*telemetrycb)(lua_State * L, int gtt, int stt, int itt) = lua_iter_call_telemetry;
-
-                        if (telemetrycb)
-                            telemetrycb(L, ttype(ra), ttype(ra + 1), ttype(ra + 2));
                     }
                     else if (ttistable(ra))
                     {
                         // set up registers for builtin iteration
                         setobj2s(L, ra + 1, ra);
-                        setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                        setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                         setnilvalue(ra);
                     }
                     else
@@ -2352,7 +2350,7 @@ reentry:
 
                         if (!ttisnil(e))
                         {
-                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)));
+                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)), LU_TAG_ITERATOR);
                             setnvalue(ra + 3, double(index + 1));
                             setobj2s(L, ra + 4, e);
 
@@ -2373,7 +2371,7 @@ reentry:
 
                         if (!ttisnil(gval(n)))
                         {
-                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)));
+                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)), LU_TAG_ITERATOR);
                             getnodekey(L, ra + 3, n);
                             setobj2s(L, ra + 4, gval(n));
 
@@ -2425,7 +2423,7 @@ reentry:
                 {
                     setnilvalue(ra);
                     // ra+1 is already the table
-                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                 }
                 else if (!ttisfunction(ra))
                 {
@@ -2454,7 +2452,7 @@ reentry:
                 {
                     setnilvalue(ra);
                     // ra+1 is already the table
-                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                 }
                 else if (!ttisfunction(ra))
                 {
@@ -2701,16 +2699,53 @@ reentry:
                 LUAU_UNREACHABLE();
             }
 
-            VM_CASE(LOP_DEP_JUMPIFEQK)
+            VM_CASE(LOP_SUBRK)
             {
-                LUAU_ASSERT(!"Unsupported deprecated opcode");
-                LUAU_UNREACHABLE();
+                Instruction insn = *pc++;
+                StkId ra = VM_REG(LUAU_INSN_A(insn));
+                TValue* kv = VM_KV(LUAU_INSN_B(insn));
+                StkId rc = VM_REG(LUAU_INSN_C(insn));
+
+                // fast-path
+                if (ttisnumber(rc))
+                {
+                    setnvalue(ra, nvalue(kv) - nvalue(rc));
+                    VM_NEXT();
+                }
+                else
+                {
+                    // slow-path, may invoke C/Lua via metamethods
+                    VM_PROTECT(luaV_doarith(L, ra, kv, rc, TM_SUB));
+                    VM_NEXT();
+                }
             }
 
-            VM_CASE(LOP_DEP_JUMPIFNOTEQK)
+            VM_CASE(LOP_DIVRK)
             {
-                LUAU_ASSERT(!"Unsupported deprecated opcode");
-                LUAU_UNREACHABLE();
+                Instruction insn = *pc++;
+                StkId ra = VM_REG(LUAU_INSN_A(insn));
+                TValue* kv = VM_KV(LUAU_INSN_B(insn));
+                StkId rc = VM_REG(LUAU_INSN_C(insn));
+
+                // fast-path
+                if (LUAU_LIKELY(ttisnumber(rc)))
+                {
+                    setnvalue(ra, nvalue(kv) / nvalue(rc));
+                    VM_NEXT();
+                }
+                else if (ttisvector(rc))
+                {
+                    float nb = cast_to(float, nvalue(kv));
+                    const float* vc = vvalue(rc);
+                    setvvalue(ra, nb / vc[0], nb / vc[1], nb / vc[2], nb / vc[3]);
+                    VM_NEXT();
+                }
+                else
+                {
+                    // slow-path, may invoke C/Lua via metamethods
+                    VM_PROTECT(luaV_doarith(L, ra, kv, rc, TM_DIV));
+                    VM_NEXT();
+                }
             }
 
             VM_CASE(LOP_FASTCALL1)

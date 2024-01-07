@@ -1,9 +1,11 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/Type.h"
-#include "Luau/TypePack.h"
-#include "Luau/UnifierSharedState.h"
+#include "Luau/Set.h"
+#include "Luau/TypeFwd.h"
+#include "Luau/TypePairHash.h"
+#include "Luau/TypePath.h"
+#include "Luau/DenseHash.h"
 
 #include <vector>
 #include <optional>
@@ -21,21 +23,82 @@ struct NormalizedType;
 struct NormalizedClassType;
 struct NormalizedStringType;
 struct NormalizedFunctionType;
+struct TypeArena;
+struct Scope;
+struct TableIndexer;
 
+enum class SubtypingVariance
+{
+    // Used for an empty key. Should never appear in actual code.
+    Invalid,
+    Covariant,
+    // This is used to identify cases where we have a covariant + a
+    // contravariant reason and we need to merge them.
+    Contravariant,
+    Invariant,
+};
+
+struct SubtypingReasoning
+{
+    // The path, relative to the _root subtype_, where subtyping failed.
+    Path subPath;
+    // The path, relative to the _root supertype_, where subtyping failed.
+    Path superPath;
+    SubtypingVariance variance = SubtypingVariance::Covariant;
+
+    bool operator==(const SubtypingReasoning& other) const;
+};
+
+struct SubtypingReasoningHash
+{
+    size_t operator()(const SubtypingReasoning& r) const;
+};
+
+using SubtypingReasonings = DenseHashSet<SubtypingReasoning, SubtypingReasoningHash>;
+static const SubtypingReasoning kEmptyReasoning = SubtypingReasoning{TypePath::kEmpty, TypePath::kEmpty, SubtypingVariance::Invalid};
 
 struct SubtypingResult
 {
     bool isSubtype = false;
     bool isErrorSuppressing = false;
     bool normalizationTooComplex = false;
+    bool isCacheable = true;
+
+    /// The reason for isSubtype to be false. May not be present even if
+    /// isSubtype is false, depending on the input types.
+    SubtypingReasonings reasoning{kEmptyReasoning};
 
     SubtypingResult& andAlso(const SubtypingResult& other);
     SubtypingResult& orElse(const SubtypingResult& other);
+    SubtypingResult& withBothComponent(TypePath::Component component);
+    SubtypingResult& withSuperComponent(TypePath::Component component);
+    SubtypingResult& withSubComponent(TypePath::Component component);
+    SubtypingResult& withBothPath(TypePath::Path path);
+    SubtypingResult& withSubPath(TypePath::Path path);
+    SubtypingResult& withSuperPath(TypePath::Path path);
 
     // Only negates the `isSubtype`.
     static SubtypingResult negate(const SubtypingResult& result);
     static SubtypingResult all(const std::vector<SubtypingResult>& results);
     static SubtypingResult any(const std::vector<SubtypingResult>& results);
+};
+
+struct SubtypingEnvironment
+{
+    struct GenericBounds
+    {
+        DenseHashSet<TypeId> lowerBound{nullptr};
+        DenseHashSet<TypeId> upperBound{nullptr};
+    };
+
+    /*
+     * When we encounter a generic over the course of a subtyping test, we need
+     * to tentatively map that generic onto a type on the other side.
+     */
+    DenseHashMap<TypeId, GenericBounds> mappedGenerics{nullptr};
+    DenseHashMap<TypePackId, TypePackId> mappedGenericPacks{nullptr};
+
+    DenseHashMap<std::pair<TypeId, TypeId>, SubtypingResult, TypePairHash> ephemeralCache{{}};
 };
 
 struct Subtyping
@@ -55,28 +118,24 @@ struct Subtyping
 
     Variance variance = Variance::Covariant;
 
-    struct GenericBounds
-    {
-        DenseHashSet<TypeId> lowerBound{nullptr};
-        DenseHashSet<TypeId> upperBound{nullptr};
-    };
+    using SeenSet = Set<std::pair<TypeId, TypeId>, TypePairHash>;
 
-    /*
-     * When we encounter a generic over the course of a subtyping test, we need
-     * to tentatively map that generic onto a type on the other side.
-     */
-    DenseHashMap<TypeId, GenericBounds> mappedGenerics{nullptr};
-    DenseHashMap<TypePackId, TypePackId> mappedGenericPacks{nullptr};
+    SeenSet seenTypes{{}};
 
-    using SeenSet = std::unordered_set<std::pair<TypeId, TypeId>, TypeIdPairHash>;
-
-    SeenSet seenTypes;
+    Subtyping(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> typeArena, NotNull<Normalizer> normalizer,
+        NotNull<InternalErrorReporter> iceReporter, NotNull<Scope> scope);
 
     Subtyping(const Subtyping&) = delete;
     Subtyping& operator=(const Subtyping&) = delete;
 
     Subtyping(Subtyping&&) = default;
     Subtyping& operator=(Subtyping&&) = default;
+
+    // Only used by unit tests to test that the cache works.
+    const DenseHashMap<std::pair<TypeId, TypeId>, SubtypingResult, TypePairHash>& peekCache() const
+    {
+        return resultCache;
+    }
 
     // TODO cache
     // TODO cyclic types
@@ -86,58 +145,63 @@ struct Subtyping
     SubtypingResult isSubtype(TypePackId subTy, TypePackId superTy);
 
 private:
-    SubtypingResult isCovariantWith(TypeId subTy, TypeId superTy);
-    SubtypingResult isCovariantWith(TypePackId subTy, TypePackId superTy);
+    DenseHashMap<std::pair<TypeId, TypeId>, SubtypingResult, TypePairHash> resultCache{{}};
+
+    SubtypingResult cache(SubtypingEnvironment& env, SubtypingResult res, TypeId subTy, TypeId superTy);
+
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, TypeId subTy, TypeId superTy);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, TypePackId subTy, TypePackId superTy);
 
     template<typename SubTy, typename SuperTy>
-    SubtypingResult isContravariantWith(SubTy&& subTy, SuperTy&& superTy);
+    SubtypingResult isContravariantWith(SubtypingEnvironment& env, SubTy&& subTy, SuperTy&& superTy);
 
     template<typename SubTy, typename SuperTy>
-    SubtypingResult isInvariantWith(SubTy&& subTy, SuperTy&& superTy);
+    SubtypingResult isInvariantWith(SubtypingEnvironment& env, SubTy&& subTy, SuperTy&& superTy);
 
     template<typename SubTy, typename SuperTy>
-    SubtypingResult isCovariantWith(const TryPair<const SubTy*, const SuperTy*>& pair);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const TryPair<const SubTy*, const SuperTy*>& pair);
 
     template<typename SubTy, typename SuperTy>
-    SubtypingResult isContravariantWith(const TryPair<const SubTy*, const SuperTy*>& pair);
+    SubtypingResult isContravariantWith(SubtypingEnvironment& env, const TryPair<const SubTy*, const SuperTy*>& pair);
 
     template<typename SubTy, typename SuperTy>
-    SubtypingResult isInvariantWith(const TryPair<const SubTy*, const SuperTy*>& pair);
+    SubtypingResult isInvariantWith(SubtypingEnvironment& env, const TryPair<const SubTy*, const SuperTy*>& pair);
 
-    SubtypingResult isCovariantWith(TypeId subTy, const UnionType* superUnion);
-    SubtypingResult isCovariantWith(const UnionType* subUnion, TypeId superTy);
-    SubtypingResult isCovariantWith(TypeId subTy, const IntersectionType* superIntersection);
-    SubtypingResult isCovariantWith(const IntersectionType* subIntersection, TypeId superTy);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, TypeId subTy, const UnionType* superUnion);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const UnionType* subUnion, TypeId superTy);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, TypeId subTy, const IntersectionType* superIntersection);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const IntersectionType* subIntersection, TypeId superTy);
 
-    SubtypingResult isCovariantWith(const NegationType* subNegation, TypeId superTy);
-    SubtypingResult isCovariantWith(const TypeId subTy, const NegationType* superNegation);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NegationType* subNegation, TypeId superTy);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const TypeId subTy, const NegationType* superNegation);
 
-    SubtypingResult isCovariantWith(const PrimitiveType* subPrim, const PrimitiveType* superPrim);
-    SubtypingResult isCovariantWith(const SingletonType* subSingleton, const PrimitiveType* superPrim);
-    SubtypingResult isCovariantWith(const SingletonType* subSingleton, const SingletonType* superSingleton);
-    SubtypingResult isCovariantWith(const TableType* subTable, const TableType* superTable);
-    SubtypingResult isCovariantWith(const MetatableType* subMt, const MetatableType* superMt);
-    SubtypingResult isCovariantWith(const MetatableType* subMt, const TableType* superTable);
-    SubtypingResult isCovariantWith(const ClassType* subClass, const ClassType* superClass);
-    SubtypingResult isCovariantWith(const ClassType* subClass, const TableType* superTable);
-    SubtypingResult isCovariantWith(const FunctionType* subFunction, const FunctionType* superFunction);
-    SubtypingResult isCovariantWith(const PrimitiveType* subPrim, const TableType* superTable);
-    SubtypingResult isCovariantWith(const SingletonType* subSingleton, const TableType* superTable);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const PrimitiveType* subPrim, const PrimitiveType* superPrim);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const SingletonType* subSingleton, const PrimitiveType* superPrim);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const SingletonType* subSingleton, const SingletonType* superSingleton);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const TableType* subTable, const TableType* superTable);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const MetatableType* subMt, const MetatableType* superMt);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const MetatableType* subMt, const TableType* superTable);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const ClassType* subClass, const ClassType* superClass);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const ClassType* subClass, const TableType* superTable);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const FunctionType* subFunction, const FunctionType* superFunction);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const PrimitiveType* subPrim, const TableType* superTable);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const SingletonType* subSingleton, const TableType* superTable);
 
-    SubtypingResult isCovariantWith(const TableIndexer& subIndexer, const TableIndexer& superIndexer);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const TableIndexer& subIndexer, const TableIndexer& superIndexer);
 
-    SubtypingResult isCovariantWith(const NormalizedType* subNorm, const NormalizedType* superNorm);
-    SubtypingResult isCovariantWith(const NormalizedClassType& subClass, const NormalizedClassType& superClass);
-    SubtypingResult isCovariantWith(const NormalizedClassType& subClass, const TypeIds& superTables);
-    SubtypingResult isCovariantWith(const NormalizedStringType& subString, const NormalizedStringType& superString);
-    SubtypingResult isCovariantWith(const NormalizedStringType& subString, const TypeIds& superTables);
-    SubtypingResult isCovariantWith(const NormalizedFunctionType& subFunction, const NormalizedFunctionType& superFunction);
-    SubtypingResult isCovariantWith(const TypeIds& subTypes, const TypeIds& superTypes);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NormalizedType* subNorm, const NormalizedType* superNorm);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NormalizedClassType& subClass, const NormalizedClassType& superClass);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NormalizedClassType& subClass, const TypeIds& superTables);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NormalizedStringType& subString, const NormalizedStringType& superString);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const NormalizedStringType& subString, const TypeIds& superTables);
+    SubtypingResult isCovariantWith(
+        SubtypingEnvironment& env, const NormalizedFunctionType& subFunction, const NormalizedFunctionType& superFunction);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const TypeIds& subTypes, const TypeIds& superTypes);
 
-    SubtypingResult isCovariantWith(const VariadicTypePack* subVariadic, const VariadicTypePack* superVariadic);
+    SubtypingResult isCovariantWith(SubtypingEnvironment& env, const VariadicTypePack* subVariadic, const VariadicTypePack* superVariadic);
 
-    bool bindGeneric(TypeId subTp, TypeId superTp);
-    bool bindGeneric(TypePackId subTp, TypePackId superTp);
+    bool bindGeneric(SubtypingEnvironment& env, TypeId subTp, TypeId superTp);
+    bool bindGeneric(SubtypingEnvironment& env, TypePackId subTp, TypePackId superTp);
 
     template<typename T, typename Container>
     TypeId makeAggregateType(const Container& container, TypeId orElse);

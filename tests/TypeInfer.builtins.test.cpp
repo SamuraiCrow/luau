@@ -9,6 +9,7 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauAlwaysCommitInferencesOfFunctionCalls);
 
 TEST_SUITE_BEGIN("BuiltinTests");
 
@@ -133,7 +134,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_predicate")
 TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_bad_predicate")
 {
     ScopedFastFlag sff[] = {
-        {"LuauAlwaysCommitInferencesOfFunctionCalls", true},
+        {FFlag::LuauAlwaysCommitInferencesOfFunctionCalls, true},
     };
 
     CheckResult result = check(R"(
@@ -149,13 +150,13 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_bad_predicate")
 could not be converted into
     '((string, string) -> boolean)?'
 caused by:
-  None of the union options are compatible. For example: 
+  None of the union options are compatible. For example:
 Type
     '(number, number) -> boolean'
 could not be converted into
     '(string, string) -> boolean'
 caused by:
-  Argument #1 type is not compatible. 
+  Argument #1 type is not compatible.
 Type 'string' could not be converted into 'number')";
     CHECK_EQ(expected, toString(result.errors[0]));
 }
@@ -482,6 +483,16 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "thread_is_a_type")
 
     LUAU_REQUIRE_NO_ERRORS(result);
     CHECK("thread" == toString(requireType("co")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "buffer_is_a_type")
+{
+    CheckResult result = check(R"(
+        local b = buffer.create(10)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK("buffer" == toString(requireType("b")));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "coroutine_resume_anything_goes")
@@ -927,6 +938,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "tonumber_returns_optional_number_type2")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "dont_add_definitions_to_persistent_types")
 {
+    // This test makes no sense with type states and I think it generally makes no sense under the new solver.
+    // TODO: clip.
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
     CheckResult result = check(R"(
         local f = math.sin
         local function g(x) return math.sin(x) end
@@ -1082,7 +1098,7 @@ end
 TEST_CASE_FIXTURE(Fixture, "string_match")
 {
     CheckResult result = check(R"(
-        local s:string
+        local s: string = "hello"
         local p = s:match("foo")
     )");
 

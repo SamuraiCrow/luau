@@ -1,5 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/CodeGen.h"
+#include "Luau/BytecodeUtils.h"
 
 #include "CodeGenLower.h"
 
@@ -42,13 +43,36 @@ static void logFunctionHeader(AssemblyBuilder& build, Proto* proto)
         build.logAppend("\n");
 }
 
+unsigned getInstructionCount(const Instruction* insns, const unsigned size)
+{
+    unsigned count = 0;
+    for (unsigned i = 0; i < size;)
+    {
+        ++count;
+        i += Luau::getOpLength(LuauOpcode(LUAU_INSN_OP(insns[i])));
+    }
+    return count;
+}
+
 template<typename AssemblyBuilder>
 static std::string getAssemblyImpl(AssemblyBuilder& build, const TValue* func, AssemblyOptions options, LoweringStats* stats)
 {
-    std::vector<Proto*> protos;
-    gatherFunctions(protos, clvalue(func)->l.p, /* flags= */ 0);
+    Proto* root = clvalue(func)->l.p;
 
-    protos.erase(std::remove_if(protos.begin(), protos.end(), [](Proto* p) { return p == nullptr; }), protos.end());
+    if ((options.flags & CodeGen_OnlyNativeModules) != 0 && (root->flags & LPF_NATIVE_MODULE) == 0)
+        return std::string();
+
+    std::vector<Proto*> protos;
+    gatherFunctions(protos, root, options.flags);
+
+    protos.erase(std::remove_if(protos.begin(), protos.end(),
+                     [](Proto* p) {
+                         return p == nullptr;
+                     }),
+        protos.end());
+
+    if (stats)
+        stats->totalFunctions += unsigned(protos.size());
 
     if (protos.empty())
     {
@@ -69,6 +93,7 @@ static std::string getAssemblyImpl(AssemblyBuilder& build, const TValue* func, A
     {
         IrBuilder ir;
         ir.buildFunctionIr(p);
+        unsigned asmCount = build.getCodeSize();
 
         if (options.includeAssembly || options.includeIr)
             logFunctionHeader(build, p);
@@ -77,6 +102,24 @@ static std::string getAssemblyImpl(AssemblyBuilder& build, const TValue* func, A
         {
             if (build.logText)
                 build.logAppend("; skipping (can't lower)\n");
+
+            asmCount = 0;
+
+            if (stats)
+                stats->skippedFunctions += 1;
+        }
+        else
+        {
+            asmCount = build.getCodeSize() - asmCount;
+        }
+
+        if (stats && stats->collectFunctionStats)
+        {
+            const char* name = p->debugname ? getstr(p->debugname) : "";
+            int line = p->linedefined;
+            unsigned bcodeCount = getInstructionCount(p->code, p->sizecode);
+            unsigned irCount = unsigned(ir.function.instructions.size());
+            stats->functions.push_back({name, line, bcodeCount, irCount, asmCount});
         }
 
         if (build.logText)
